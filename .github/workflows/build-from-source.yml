@@ -72,13 +72,14 @@ jobs:
           find . -name 'lib-*-release.aar' -type f -exec cp {} /tmp/custom-aars/ \;
           ls -lh /tmp/custom-aars/
 
-      # FongMi TV 5.8.9 buildSrc verifies that libmpv.so links against a single
-      # unified libffmpeg.so. The .so files checked into the media branch are
-      # older (split-ffmpeg) artifacts, so replace them with the official mpv
-      # runtime artifacts shipped by FongMi for this exact compatibility ID
-      # (mpv-jni-ffmpeg-shared-v1). These are the very libraries the app
-      # downloads at runtime, so this does not change app behaviour.
-      - name: Replace mpv/FFmpeg native libs with official runtime artifacts
+      # FongMi TV 5.8.9 buildSrc verifies that all mpv/FFmpeg native libraries
+      # use ONE unified libffmpeg.so. The .so files checked into the media
+      # branch are older split-ffmpeg artifacts, so replace them with the
+      # official binaries shipped by FongMi for this exact version:
+      #   - mpv player libs: runtime-mpv-1.1.2-<abi>.apk (compatibility id
+      #     mpv-jni-ffmpeg-shared-v1, the APK the app itself downloads)
+      #   - unified ffmpeg libs: official 5.8.9 APKs
+      - name: Replace mpv/FFmpeg native libs with official binaries
         run: |
           set -e
           for abi in arm64-v8a armeabi-v7a; do
@@ -87,37 +88,65 @@ jobs:
               "https://github.com/FongMi/Release/releases/download/module/runtime-mpv-1.1.2-$abi.apk"
             mkdir -p "/tmp/mpv-natives/$abi"
             unzip -q -o "/tmp/runtime-mpv-$abi.apk" "lib/$abi/*.so" -d "/tmp/mpv-natives/$abi"
-            echo "--- $abi native libs ---"
-            ls -lh "/tmp/mpv-natives/$abi/lib/$abi/"
+
+            case "$abi" in
+              arm64-v8a) apk=mobile-arm64_v8a.apk ;;
+              armeabi-v7a) apk=mobile-armeabi_v7a.apk ;;
+            esac
+            echo "Downloading official 5.8.9 $apk"
+            curl -fsSL --retry 3 -o "/tmp/official-$abi.apk" \
+              "https://github.com/FongMi/Release/releases/download/5.8.9/$apk"
+            mkdir -p "/tmp/official-natives/$abi"
+            unzip -q -o "/tmp/official-$abi.apk" "lib/$abi/*.so" -d "/tmp/official-natives/$abi"
+            echo "--- $abi official ffmpeg libs ---"
+            ls -lh "/tmp/official-natives/$abi/lib/$abi/" | grep -E 'ffmpeg|c\+\+' || true
           done
           python3 - <<'PY'
           import glob, os, shutil, zipfile
+          SPLIT = {
+              'libavcodec.so', 'libavdevice.so', 'libavfilter.so',
+              'libavformat.so', 'libavutil.so', 'libswresample.so', 'libswscale.so',
+          }
+          UNIFIED = {
+              'libffmpeg.so', 'libffmpegJNI.so', 'libffmpegDoviJNI.so',
+              'libffmpegMotionJNI.so', 'libc++_shared.so',
+          }
           targets = [
               '/tmp/custom-aars/lib-mpvplayer-release.aar',
               '/tmp/custom-aars/lib-decoder-ffmpeg-release.aar',
           ]
           abis = ('arm64-v8a', 'armeabi-v7a')
-          runtime = {}
+          replace = {}
+          dropped = []
           for abi in abis:
               for src in glob.glob('/tmp/mpv-natives/%s/lib/%s/*.so' % (abi, abi)):
+                  replace['jni/%s/%s' % (abi, os.path.basename(src))] = open(src, 'rb').read()
+              for src in glob.glob('/tmp/official-natives/%s/lib/%s/*.so' % (abi, abi)):
                   name = os.path.basename(src)
-                  with open(src, 'rb') as fh:
-                      runtime['jni/%s/%s' % (abi, name)] = fh.read()
-          print('runtime native entries:', len(runtime))
+                  if name in UNIFIED:
+                      replace['jni/%s/%s' % (abi, name)] = open(src, 'rb').read()
+          print('replacement native entries:', len(replace))
           for aar in targets:
               if not os.path.isfile(aar):
                   raise SystemExit('missing AAR: ' + aar)
               patched = aar + '.patched'
               with zipfile.ZipFile(aar) as zin, zipfile.ZipFile(patched, 'w', zipfile.ZIP_DEFLATED) as zout:
                   for item in zin.infolist():
-                      if item.filename in runtime:
+                      name = item.filename
+                      parts = name.split('/')
+                      if len(parts) == 3 and parts[0] == 'jni' and parts[2] in SPLIT:
+                          dropped.append(name)
                           continue
-                      zout.writestr(item, zin.read(item.filename))
-                  for name, data in runtime.items():
+                      if name in replace:
+                          continue
+                      zout.writestr(item, zin.read(name))
+                  for name, data in replace.items():
                       zout.writestr(name, data)
-                      print('injected', name)
               shutil.move(patched, aar)
               print('patched', os.path.basename(aar))
+          print('dropped split ffmpeg entries:', len(dropped))
+          if not dropped:
+              raise SystemExit('ERROR: no split ffmpeg libs were removed')
           PY
 
       # ---------- Stage 2: official 5.8.9 source ----------
