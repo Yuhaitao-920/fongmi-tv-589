@@ -45,18 +45,37 @@ jobs:
 
       - name: Extract androidx.media3 classes into one jar
         run: |
-          mkdir -p extract_root
-          for j in dexout/*.jar; do
-            unzip -o -q "$j" 'androidx/media3/*' -d extract_root 2>/dev/null || true
-            unzip -o -q "$j" 'androidx/media3/**' -d extract_root 2>/dev/null || true
-          done
-          echo "media3 class files extracted:"
-          find extract_root/androidx/media3 -name '*.class' 2>/dev/null | wc -l
-          echo "key custom classes:"
-          find extract_root/androidx/media3 -name 'MediaChapter.class' -o -name 'DecoderMode.class' -o -name 'DolbyVisionOutputPolicy.class' -o -name 'DiscMenuController.class' -o -name 'SubtitleContent.class' 2>/dev/null | head
-          cd extract_root
-          jar cf ../app/libs/media3-official.jar androidx/media3
-          cd ..
+          python3 - <<'PY'
+          import zipfile, glob, os
+          os.makedirs('extract_root', exist_ok=True)
+          count = 0
+          for jar in glob.glob('dexout/*.jar'):
+              with zipfile.ZipFile(jar) as z:
+                  for name in z.namelist():
+                      if name.startswith('androidx/media3/') and not name.endswith('/'):
+                          data = z.read(name)
+                          out = os.path.join('extract_root', name)
+                          os.makedirs(os.path.dirname(out), exist_ok=True)
+                          with open(out, 'wb') as f:
+                              f.write(data)
+                          count += 1
+          print('media3 entries extracted:', count)
+          for key in ['MediaChapter.class','DecoderMode.class','DolbyVisionOutputPolicy.class',
+                      'DiscMenuController.class','DiscMenuState.class','SubtitleContent.class',
+                      'SubtitleOffsets.class','SubtitleSelectionState.class','MediaEdition.class']:
+              matches=[]
+              for root,_,files in os.walk('extract_root/androidx/media3'):
+                  if key in files: matches.append(os.path.join(root,key))
+              print(' ',key,'=>', 'FOUND' if matches else 'MISSING')
+          # build jar with python to include all nested classes
+          with zipfile.ZipFile('app/libs/media3-official.jar','w',zipfile.ZIP_DEFLATED) as outz:
+              for root,_,files in os.walk('extract_root/androidx/media3'):
+                  for fn in files:
+                      full=os.path.join(root,fn)
+                      arc=os.path.relpath(full,'extract_root')
+                      outz.write(full,arc)
+          print('jar size:', os.path.getsize('app/libs/media3-official.jar'))
+          PY
           ls -lh app/libs/media3-official.jar
 
       - name: Switch build config to use extracted media3 jar
