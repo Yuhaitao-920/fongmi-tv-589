@@ -72,6 +72,48 @@ jobs:
           find . -name 'lib-*-release.aar' -type f -exec cp {} /tmp/custom-aars/ \;
           ls -lh /tmp/custom-aars/
 
+      # FongMi TV 5.8.9 buildSrc verifies that libmpv.so links against a single
+      # unified libffmpeg.so. The .so files checked into the media branch are
+      # older (split-ffmpeg) artifacts, so replace them with the official mpv
+      # runtime artifacts shipped by FongMi for this exact compatibility ID
+      # (mpv-jni-ffmpeg-shared-v1). These are the very libraries the app
+      # downloads at runtime, so this does not change app behaviour.
+      - name: Replace mpv/FFmpeg native libs with official runtime artifacts
+        run: |
+          set -e
+          for abi in arm64-v8a armeabi-v7a; do
+            echo "Downloading runtime-mpv-1.1.2-$abi.apk"
+            curl -fsSL --retry 3 -o "/tmp/runtime-mpv-$abi.apk" \
+              "https://github.com/FongMi/Release/releases/download/module/runtime-mpv-1.1.2-$abi.apk"
+            mkdir -p "/tmp/mpv-natives/$abi"
+            unzip -q -o "/tmp/runtime-mpv-$abi.apk" "lib/$abi/*.so" -d "/tmp/mpv-natives/$abi"
+            echo "--- $abi native libs ---"
+            ls -lh "/tmp/mpv-natives/$abi/lib/$abi/"
+          done
+          python3 - <<'PY'
+          import glob, os, shutil, zipfile
+          targets = [
+              '/tmp/custom-aars/lib-mpvplayer-release.aar',
+              '/tmp/custom-aars/lib-decoder-ffmpeg-release.aar',
+          ]
+          abis = ('arm64-v8a', 'armeabi-v7a')
+          for aar in targets:
+              if not os.path.isfile(aar):
+                  raise SystemExit('missing AAR: ' + aar)
+              patched = aar + '.patched'
+              with zipfile.ZipFile(aar) as zin, zipfile.ZipFile(patched, 'w', zipfile.ZIP_DEFLATED) as zout:
+                  for item in zin.infolist():
+                      zout.writestr(item, zin.read(item.filename))
+                  for abi in abis:
+                      for src in glob.glob('/tmp/mpv-natives/%s/lib/%s/*.so' % (abi, abi)):
+                          name = os.path.basename(src)
+                          with open(src, 'rb') as fh:
+                              zout.writestr('jni/%s/%s' % (abi, name), fh.read())
+                          print('injected', abi, name)
+              shutil.move(patched, aar)
+              print('patched', os.path.basename(aar))
+          PY
+
       # ---------- Stage 2: official 5.8.9 source ----------
       - name: Clone official FongMi TV 5.8.9 source (fongmi branch)
         run: |
