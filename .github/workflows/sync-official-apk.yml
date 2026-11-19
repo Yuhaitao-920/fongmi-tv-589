@@ -1,0 +1,63 @@
+name: Sync official FongMi TV release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Official release tag to sync (e.g. 5.8.9)'
+        required: true
+        default: '5.8.9'
+      create_release:
+        description: 'Publish the synced APK to this repo Release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch official release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p official-apks
+          echo "Fetching FongMi/Release tag $VERSION ..."
+          gh release download "$VERSION" \
+            --repo FongMi/Release \
+            --pattern '*.apk' \
+            --dir official-apks
+          echo "===== downloaded ====="
+          ls -lh official-apks/
+          echo "===== sha256 ====="
+          sha256sum official-apks/*.apk | tee official-apks/SHA256SUMS.txt
+
+      - name: Publish to this repository Release
+        if: ${{ inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          TAG="official-$VERSION"
+          gh release create "$TAG" official-apks/*.apk official-apks/SHA256SUMS.txt \
+            --title "FongMi TV $VERSION (official APK)" \
+            --notes "Byte-identical APKs downloaded from the official FongMi/Release $VERSION release. Source code for this version is in this repository (official FongMi/TV fongmi branch)." \
+            --repo "$GITHUB_REPOSITORY" \
+            || gh release upload "$TAG" official-apks/*.apk official-apks/SHA256SUMS.txt \
+                 --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fongmi-official-${{ inputs.version }}-apks
+          path: official-apks/*.apk
+          if-no-files-found: error
