@@ -39,18 +39,34 @@ Android TV、手機、平板都能用，支援本地檔案與網址播放。
 中 `mobile-arm64_v8a.apk` 大小精确到字节一致（57,672,761 字节），
 官方 SHA256 为 `b9f76788103c25d1f2b1488bbda3ec52ebc31fb73a4a6e3a92329492ec12b1fd`。
 
-### 为什么无法从公开源码重新编译出完全一致的 APK
+### 为什么无法仅凭公开源码重新编译出 5.8.9 原版
 
-5.8.9 源码依赖 FongMi 自行 fork 并深度定制的 **Media3 1.11.1**，其中含
-`MediaChapter`、`DecoderMode`、`DolbyVisionOutputPolicy`、`DiscMenuController`、
-`SubtitleContent` 等大量私有类。这些类：
+5.8.9（2026-11-18）依赖 FongMi 自行深度定制的 Media3，其中包含
+`DecoderMode`、`DiscMenuController`、`DiscMenuState`、`SubtitleContent`、
+`SubtitleOffsets`、`VideoTransform`、`VideoAdjustment`、`BdjRuntime`、
+`FfmpegMotionInterpolationController` 等 22 个私有类。
 
-- 不在 Google 官方 Media3 中；
-- 不在公开的 [FongMi/media](https://github.com/FongMi/media) fork（最新仅 1.11.0）中；
-- 不在任何公开仓库以源码或 aar 形式提供。
+经核查：
 
-因此仅凭公开源码与依赖，**无法重新编译出与官方 5.8.9 一致的可运行 APK**。
-本仓库的 `build-apk.yml` 可完成环境准备与编译尝试，但会在这些缺失类处停止。
+- 公开仓库 [FongMi/media](https://github.com/FongMi/media) 只有两个分支：
+  `release`（纯上游 Media3 1.11.x）和 `release-1.11.0-fongmi`（定制分支，
+  最后提交 **2026-08-12**）。后者只含 `MediaChapter`/`MediaEdition` 等**部分**
+  定制类，上述 22 个类一个都没有；
+- `FongMi/Release` 只发布 APK 与运行时组件，没有发布定制 AAR；
+- 全 GitHub 代码搜索只能在这些类的**使用方**（FongMi/TV）找到它们，
+  没有任何公开仓库提供定义源码或 aar；
+- 官方 APK 中的这些类名已被 R8 混淆/内联，无法反编译还原成可编译的源码。
+
+实测结果（`build-from-source.yml`，run `44574617664`）：
+
+1. 用 `release-1.11.0-fongmi` 编译 20 个定制 AAR ✅ 成功；
+2. 用官方运行时 APK 与官方 5.8.9 APK 中的 native 库替换旧的 split-ffmpeg 库，
+   通过 `verify*MpvNative` 校验 ✅ 成功；
+3. 编译 TV 源码时因上述 22 个私有类缺失失败 ❌（302 处 `cannot find symbol`）。
+
+**结论：原版 APK 可以在本仓库 Release 中原样获取，但「用公开源码自行构建出
+5.8.9 原版」客观上不可行**——作者没有公开与 5.8.9 匹配的 Media3 定制源码/产物。
+手写桩类虽然能过编译，但播放器核心功能会失效，不是「一模一样」。
 
 ### 推荐做法：同步官方原版 APK
 
