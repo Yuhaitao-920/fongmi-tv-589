@@ -90,22 +90,14 @@ jobs:
           EOF
           echo "local.properties written"
 
-      - name: Build APK (selected variant)
-        if: ${{ inputs.variant != 'all' }}
+      - name: Discover assemble tasks
         run: |
-          TASK="assemble${{ inputs.variant }}Debug"
-          echo "Running: ./gradlew $TASK"
-          ./gradlew "$TASK" --no-daemon --stacktrace
+          echo "===== available assemble tasks ====="
+          ./gradlew tasks --all --no-daemon 2>&1 | grep -iE '^assemble|assemble[A-Z]' | sort -u | head -60 || true
 
-      - name: Build APK (all variants)
-        if: ${{ inputs.variant == 'all' }}
+      - name: Build APK
         run: |
-          ./gradlew \
-            assembleMobileArm64_v8aDebug \
-            assembleMobileArmeabi_v7aDebug \
-            assembleLeanbackArm64_v8aDebug \
-            assembleLeanbackArmeabi_v7aDebug \
-            --no-daemon --stacktrace
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Collect APKs
         id: collect
