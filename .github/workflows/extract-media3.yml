@@ -62,13 +62,21 @@ jobs:
                               f.write(data)
                           count += 1
           print('media3 entries extracted:', count)
+          # diagnostic: list all entries containing media3 / MediaChapter across jars
+          import glob as g
+          for jar in g.glob('/tmp/dexout/*.jar'):
+              with zipfile.ZipFile(jar) as z:
+                  names=z.namelist()
+                  m3=[n for n in names if 'media3' in n.lower()]
+                  mc=[n for n in names if 'MediaChapter' in n or 'DecoderMode' in n or 'DolbyVision' in n]
+                  print('JAR',os.path.basename(jar),'total',len(names),'media3-ish',len(m3),'keyhits',mc[:8])
           for key in ['MediaChapter.class','DecoderMode.class','DolbyVisionOutputPolicy.class',
                       'DiscMenuController.class','DiscMenuState.class','SubtitleContent.class',
                       'SubtitleOffsets.class','SubtitleSelectionState.class','MediaEdition.class']:
               matches=[]
-              for root,_,files in os.walk('extract_root/androidx/media3'):
+              for root,_,files in os.walk('extract_root'):
                   if key in files: matches.append(os.path.join(root,key))
-              print(' ',key,'=>', 'FOUND' if matches else 'MISSING')
+              print(' ',key,'=>', ('FOUND '+str(matches[0]) if matches else 'MISSING'))
           # build jar with python to include all nested classes
           with zipfile.ZipFile('app/libs/media3-official.jar','w',zipfile.ZIP_DEFLATED) as outz:
               for root,_,files in os.walk('extract_root/androidx/media3'):
