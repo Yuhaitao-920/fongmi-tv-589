@@ -71,8 +71,7 @@ jobs:
             libraries/common/src/main/java/androidx/media3/common/DecoderMode.java \
             libraries/common/src/main/java/androidx/media3/common/DiscMenuController.java \
             libraries/common/src/main/java/androidx/media3/common/text/SubtitleContent.java \
-            libraries/common/src/main/java/androidx/media3/mpvplayer/src/main/java/androidx/media3/mpvplayer/MpvPlayer.java; do
-            # mpvplayer path differs; check with find if not at fixed path
+            libraries/mpvplayer/src/main/java/androidx/media3/mpvplayer/MpvPlayer.java; do
             if [ -f "/tmp/media/$c" ]; then echo "OK $c"; fi
           done
           test -f /tmp/media/libraries/common/src/main/java/androidx/media3/common/DecoderMode.java \
@@ -101,7 +100,16 @@ jobs:
           echo "AAR count: $AAR_COUNT"
           test "$AAR_COUNT" -ge 15 || { echo "ERROR: too few AARs"; exit 1; }
           mkdir -p /tmp/custom-aars
-          find . -name 'lib-*-release.aar' -type f -exec cp {} /tmp/custom-aars/ \;
+          # The official build copies ONLY the 20 AARs listed in move.txt into
+          # app/libs. Copying every lib-*-release.aar pulls in GMS-dependent
+          # modules (lib-exoplayer-ima) and duplicate UI libs that break the
+          # resource link. Follow move.txt exactly.
+          grep -vE '^\s*(#|$)' move.txt | while read -r aar_name; do
+            f=$(find . -name "$aar_name" -type f | head -1)
+            test -n "$f" || { echo "ERROR: move.txt AAR not built: $aar_name"; exit 1; }
+            cp "$f" /tmp/custom-aars/
+          done
+          echo "AARs copied per move.txt: $(ls /tmp/custom-aars/*.aar | wc -l)"
           ls -lh /tmp/custom-aars/
           echo "===== unified native check ====="
           python3 - <<'PY'
