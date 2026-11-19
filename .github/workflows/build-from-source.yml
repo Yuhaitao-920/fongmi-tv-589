@@ -81,6 +81,30 @@ jobs:
           test -f /tmp/media/libraries/mpvplayer/src/main/java/androidx/media3/mpvplayer/MpvPlayer.java \
             || { echo "ERROR: MpvPlayer missing in Media3 source"; exit 1; }
 
+      - name: Patch PlayerView.getVideoBounds (needed by TV 5.8.9 mobile)
+        run: |
+          # TV 5.8.9's TouchInput calls PlayerView.getVideoBounds(). This fork's
+          # PlayerView has the transform APIs but not getVideoBounds; another
+          # FongMi media fork (dlgt7) has it. Inject the same implementation.
+          python3 - <<'PY'
+          import base64
+          p = '/tmp/media/libraries/ui/src/main/java/androidx/media3/ui/PlayerView.java'
+          s = open(p, encoding='utf-8').read()
+          if 'getVideoBounds' not in s:
+              if 'import android.graphics.RectF;' not in s:
+                  s = s.replace('import android.graphics.Rect;',
+                                'import android.graphics.Rect;\nimport android.graphics.RectF;', 1)
+              method = base64.b64decode(
+                  'ICAvKiogUmV0dXJucyB0aGUgYm91bmRzIG9mIHRoZSB2aWRlbyBjb250ZW50IGluIHRoaXMgdmlldydzIGNvb3JkaW5hdGUgc3BhY2UuICovCiAgQFVuc3RhYmxlQXBpCiAgcHVibGljIFJlY3RGIGdldFZpZGVvQm91bmRzKCkgewogICAgUmVjdEYgYm91bmRzID0gbmV3IFJlY3RGKCk7CiAgICBATnVsbGFibGUgVmlldyB0YXJnZXQgPSBzdXJmYWNlVmlldyAhPSBudWxsID8gc3VyZmFjZVZpZXcgOiBjb250ZW50RnJhbWU7CiAgICBpZiAodGFyZ2V0ID09IG51bGwpIHsKICAgICAgYm91bmRzLnNldCgwLCAwLCBnZXRXaWR0aCgpLCBnZXRIZWlnaHQoKSk7CiAgICAgIHJldHVybiBib3VuZHM7CiAgICB9CiAgICBSZWN0IHJlY3QgPSBuZXcgUmVjdCgpOwogICAgcmVjdC5zZXQoMCwgMCwgdGFyZ2V0LmdldFdpZHRoKCksIHRhcmdldC5nZXRIZWlnaHQoKSk7CiAgICBvZmZzZXREZXNjZW5kYW50UmVjdFRvTXlDb29yZHModGFyZ2V0LCByZWN0KTsKICAgIGJvdW5kcy5zZXQocmVjdCk7CiAgICByZXR1cm4gYm91bmRzOwogIH0KCg=='
+              ).decode('utf-8')
+              anchor = '  /** Returns the current video scale and pan transform. */'
+              assert anchor in s, 'anchor getVideoTransform not found'
+              s = s.replace(anchor, method + anchor, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('Injected getVideoBounds into PlayerView.java')
+          assert 'getVideoBounds' in open(p, encoding='utf-8').read()
+          PY
+
       - name: Build custom Media3 AARs
         run: |
           cd /tmp/media
