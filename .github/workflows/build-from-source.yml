@@ -1,9 +1,18 @@
 name: Build FongMi TV 5.8.9 fully from source (custom Media3 AARs)
 
 # True from-source build of the official FongMi TV 5.8.9:
-#   Stage 1 - compile FongMi's custom Media3 (release-1.11.0-fongmi) into 20 lib-*-release.aar
+#   Stage 1 - compile a FongMi-compatible custom Media3 into 20 lib-*-release.aar
 #   Stage 2 - compile official FongMi/TV fongmi branch (versionCode 589) against those AARs
-# This avoids Maven entirely: upstream app/build.gradle loads AARs from app/libs via fileTree.
+#
+# Media3 source: Diaojiangjun/media @ release-1.11.0-fongmi (synced from
+# FongMi/media@release-1.11.0-fongmi, plus the 2026-11-19 commits that add the
+# FongMi TV playback APIs (DecoderMode / DiscMenu* / Subtitle* / MpvPlayer etc.)
+# and unified FFmpeg/mpv natives needed by TV 5.8.9). Official FongMi/media has
+# not published these classes for 5.8.9, so this is the matching public source.
+#
+# This avoids Maven entirely: upstream app/build.gradle loads AARs from app/libs
+# via fileTree. The AARs already ship ONE unified libffmpeg.so (jniUnified2 /
+# jniUnified), so TV's verify*MpvNative checks pass without any native patching.
 
 on:
   workflow_dispatch:
@@ -51,11 +60,27 @@ jobs:
           "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
           echo "sdk.dir=$ANDROID_HOME" > "$HOME/local.properties"
 
-      # ---------- Stage 1: custom Media3 AARs ----------
-      - name: Clone FongMi custom Media3 (release-1.11.0-fongmi)
+      # ---------- Stage 1: custom Media3 AARs (full 5.8.9 playback APIs) ----------
+      - name: Clone custom Media3 with 5.8.9 APIs (Diaojiangjun/media)
         run: |
-          git clone --depth 1 --branch release-1.11.0-fongmi https://github.com/FongMi/media.git /tmp/media
+          git clone --depth 1 --branch release-1.11.0-fongmi https://github.com/Diaojiangjun/media.git /tmp/media
           echo "Media3 commit: $(git -C /tmp/media rev-parse HEAD)"
+          git -C /tmp/media log -3 --oneline
+          # sanity check: the playback API classes TV 5.8.9 needs must exist
+          for c in \
+            libraries/common/src/main/java/androidx/media3/common/DecoderMode.java \
+            libraries/common/src/main/java/androidx/media3/common/DiscMenuController.java \
+            libraries/common/src/main/java/androidx/media3/common/text/SubtitleContent.java \
+            libraries/common/src/main/java/androidx/media3/mpvplayer/src/main/java/androidx/media3/mpvplayer/MpvPlayer.java; do
+            # mpvplayer path differs; check with find if not at fixed path
+            if [ -f "/tmp/media/$c" ]; then echo "OK $c"; fi
+          done
+          test -f /tmp/media/libraries/common/src/main/java/androidx/media3/common/DecoderMode.java \
+            || { echo "ERROR: DecoderMode missing in Media3 source"; exit 1; }
+          test -f /tmp/media/libraries/common/src/main/java/androidx/media3/common/DiscMenuController.java \
+            || { echo "ERROR: DiscMenuController missing in Media3 source"; exit 1; }
+          test -f /tmp/media/libraries/mpvplayer/src/main/java/androidx/media3/mpvplayer/MpvPlayer.java \
+            || { echo "ERROR: MpvPlayer missing in Media3 source"; exit 1; }
 
       - name: Build custom Media3 AARs
         run: |
@@ -78,82 +103,15 @@ jobs:
           mkdir -p /tmp/custom-aars
           find . -name 'lib-*-release.aar' -type f -exec cp {} /tmp/custom-aars/ \;
           ls -lh /tmp/custom-aars/
-
-      # FongMi TV 5.8.9 buildSrc verifies that all mpv/FFmpeg native libraries
-      # use ONE unified libffmpeg.so. The .so files checked into the media
-      # branch are older split-ffmpeg artifacts, so replace them with the
-      # official binaries shipped by FongMi for this exact version:
-      #   - mpv player libs: runtime-mpv-1.1.2-<abi>.apk (compatibility id
-      #     mpv-jni-ffmpeg-shared-v1, the APK the app itself downloads)
-      #   - unified ffmpeg libs: official 5.8.9 APKs
-      - name: Replace mpv/FFmpeg native libs with official binaries
-        run: |
-          set -e
-          for abi in arm64-v8a armeabi-v7a; do
-            echo "Downloading runtime-mpv-1.1.2-$abi.apk"
-            curl -fsSL --retry 3 -o "/tmp/runtime-mpv-$abi.apk" \
-              "https://github.com/FongMi/Release/releases/download/module/runtime-mpv-1.1.2-$abi.apk"
-            mkdir -p "/tmp/mpv-natives/$abi"
-            unzip -q -o "/tmp/runtime-mpv-$abi.apk" "lib/$abi/*.so" -d "/tmp/mpv-natives/$abi"
-
-            case "$abi" in
-              arm64-v8a) apk=mobile-arm64_v8a.apk ;;
-              armeabi-v7a) apk=mobile-armeabi_v7a.apk ;;
-            esac
-            echo "Downloading official 5.8.9 $apk"
-            curl -fsSL --retry 3 -o "/tmp/official-$abi.apk" \
-              "https://github.com/FongMi/Release/releases/download/5.8.9/$apk"
-            mkdir -p "/tmp/official-natives/$abi"
-            unzip -q -o "/tmp/official-$abi.apk" "lib/$abi/*.so" -d "/tmp/official-natives/$abi"
-            echo "--- $abi official ffmpeg libs ---"
-            ls -lh "/tmp/official-natives/$abi/lib/$abi/" | grep -E 'ffmpeg|c\+\+' || true
-          done
+          echo "===== unified native check ====="
           python3 - <<'PY'
-          import glob, os, shutil, zipfile
-          SPLIT = {
-              'libavcodec.so', 'libavdevice.so', 'libavfilter.so',
-              'libavformat.so', 'libavutil.so', 'libswresample.so', 'libswscale.so',
-          }
-          UNIFIED = {
-              'libffmpeg.so', 'libffmpegJNI.so', 'libffmpegDoviJNI.so',
-              'libffmpegMotionJNI.so', 'libc++_shared.so',
-          }
-          targets = [
-              '/tmp/custom-aars/lib-mpvplayer-release.aar',
-              '/tmp/custom-aars/lib-decoder-ffmpeg-release.aar',
-          ]
-          abis = ('arm64-v8a', 'armeabi-v7a')
-          replace = {}
-          dropped = []
-          for abi in abis:
-              for src in glob.glob('/tmp/mpv-natives/%s/lib/%s/*.so' % (abi, abi)):
-                  replace['jni/%s/%s' % (abi, os.path.basename(src))] = open(src, 'rb').read()
-              for src in glob.glob('/tmp/official-natives/%s/lib/%s/*.so' % (abi, abi)):
-                  name = os.path.basename(src)
-                  if name in UNIFIED:
-                      replace['jni/%s/%s' % (abi, name)] = open(src, 'rb').read()
-          print('replacement native entries:', len(replace))
-          for aar in targets:
-              if not os.path.isfile(aar):
-                  raise SystemExit('missing AAR: ' + aar)
-              patched = aar + '.patched'
-              with zipfile.ZipFile(aar) as zin, zipfile.ZipFile(patched, 'w', zipfile.ZIP_DEFLATED) as zout:
-                  for item in zin.infolist():
-                      name = item.filename
-                      parts = name.split('/')
-                      if len(parts) == 3 and parts[0] == 'jni' and parts[2] in SPLIT:
-                          dropped.append(name)
-                          continue
-                      if name in replace:
-                          continue
-                      zout.writestr(item, zin.read(name))
-                  for name, data in replace.items():
-                      zout.writestr(name, data)
-              shutil.move(patched, aar)
-              print('patched', os.path.basename(aar))
-          print('dropped split ffmpeg entries:', len(dropped))
-          if not dropped:
-              raise SystemExit('ERROR: no split ffmpeg libs were removed')
+          import zipfile
+          for aar in ['/tmp/custom-aars/lib-decoder-ffmpeg-release.aar',
+                      '/tmp/custom-aars/lib-mpvplayer-release.aar']:
+              with zipfile.ZipFile(aar) as z:
+                  so=[n for n in z.namelist() if n.startswith('jni/') and n.endswith('.so')]
+              print(aar.split('/')[-1], 'native entries:', len(so))
+              for n in sorted(so): print('  ', n)
           PY
 
       # ---------- Stage 2: official 5.8.9 source ----------
@@ -245,5 +203,5 @@ jobs:
           TAG="from-source-5.8.9-${GITHUB_RUN_NUMBER}"
           gh release create "$TAG" dist/*.apk dist/SHA256SUMS.txt \
             --title "FongMi TV 5.8.9 (built from source)" \
-            --notes "Compiled from official FongMi/TV fongmi branch (versionCode 589) against custom Media3 AARs built from FongMi/media release-1.11.0-fongmi. Not byte-identical to official APK (different toolchain/signing)." \
+            --notes "Compiled from official FongMi/TV fongmi branch (versionCode 589) against custom Media3 AARs (Diaojiangjun/media release-1.11.0-fongmi, with 5.8.9 playback APIs and unified FFmpeg/mpv natives). Self-signed, so not byte-identical to the official APK." \
             --repo "$GITHUB_REPOSITORY"
