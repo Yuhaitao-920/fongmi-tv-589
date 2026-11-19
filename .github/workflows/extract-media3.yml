@@ -27,7 +27,10 @@ jobs:
           curl -L -o dex2jar.zip \
             https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
           unzip -q dex2jar.zip -d dex2jar
-          chmod +x dex2jar/dex-tools-2.4/*.sh
+          D2J=$(find dex2jar -name 'd2j-dex2jar.sh' | head -1)
+          echo "D2J=$D2J"
+          chmod +x "$(dirname "$D2J")"/*.sh
+          echo "D2J_PATH=$D2J" >> $GITHUB_ENV
 
       - name: Convert dex files to jars
         run: |
@@ -36,9 +39,9 @@ jobs:
           ls -lh dexout/
           for d in dexout/*.dex; do
             echo "Converting $d ..."
-            dex2jar/dex-tools-2.4/d2j-dex2jar.sh -f "$d" -o "${d%.dex}.jar" >/dev/null 2>&1
+            "$D2J_PATH" -f "$d" -o "${d%.dex}.jar" >/dev/null 2>&1 || echo "convert failed for $d"
           done
-          ls -lh dexout/*.jar
+          ls -lh dexout/*.jar 2>/dev/null || echo "NO JARS PRODUCED"
 
       - name: Extract androidx.media3 classes into one jar
         run: |
