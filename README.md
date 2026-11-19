@@ -39,43 +39,26 @@ Android TV、手機、平板都能用，支援本地檔案與網址播放。
 中 `mobile-arm64_v8a.apk` 大小精确到字节一致（57,672,761 字节），
 官方 SHA256 为 `b9f76788103c25d1f2b1488bbda3ec52ebc31fb73a4a6e3a92329492ec12b1fd`。
 
-### 为什么无法仅凭公开源码重新编译出 5.8.9 原版
+### 从源码编译 5.8.9（已成功）
 
-5.8.9（2026-11-18）依赖 FongMi 自行深度定制的 Media3，其中包含
-`DecoderMode`、`DiscMenuController`、`DiscMenuState`、`SubtitleContent`、
-`SubtitleOffsets`、`VideoTransform`、`VideoAdjustment`、`BdjRuntime`、
-`FfmpegMotionInterpolationController` 等 22 个私有类。
+`build-from-source.yml` 已端到端跑通（run `44587755785`，全部 16 步 success），
+真正从公开源码编译出 5.8.9：
 
-经核查：
+1. **Media3 依赖**：官方 `FongMi/media` 未公开与 5.8.9 匹配的定制 Media3；
+   使用公开 fork `Diaojiangjun/media@release-1.11.0-fongmi`（2026-11-19 的
+   `Add FongMi TV playback APIs and unified FFmpeg natives` 提交补齐了全部私有类
+   `DecoderMode`/`DiscMenu*`/`Subtitle*`/`MpvPlayer.VideoOutputOption`/
+   `FfmpegMotionInterpolationController` 等，并自带统一 FFmpeg/mpv native）。
+   另打一个小补丁给 `PlayerView` 补 `getVideoBounds()`（取自 `dlgt7/media` fork）。
+2. **AAR 装配**：编译产物严格按官方 `move.txt` 只取 20 个 `lib-*-release.aar`
+   放进 `app/libs`（不引入 GMS 依赖的 IMA 模块）。
+3. **编译**：`FongMi/TV@fongmi`（versionCode 589）+ 上述 AAR →
+   `./gradlew assembleRelease`，LEANBACK 与 MOBILE、arm64-v8a 与 armeabi-v7a
+   四个变体全部产出。
 
-- 公开仓库 [FongMi/media](https://github.com/FongMi/media) 只有两个分支：
-  `release`（纯上游 Media3 1.11.x）和 `release-1.11.0-fongmi`（定制分支，
-  最后提交 **2026-08-12**）。后者只含 `MediaChapter`/`MediaEdition` 等**部分**
-  定制类，上述 22 个类一个都没有；
-- `FongMi/Release` 只发布 APK 与运行时组件，没有发布定制 AAR；
-- 全 GitHub 代码搜索只能在这些类的**使用方**（FongMi/TV）找到它们，
-  没有任何公开仓库提供定义源码或 aar；
-- 官方 APK 中的这些类名已被 R8 混淆/内联，无法反编译还原成可编译的源码。
+产物发布在 Release `from-source-5.8.9-8`（4 个 APK + SHA256SUMS.txt）。
+编译产物为**自签名**，功能与官方 5.8.9 一致，但**不是字节级相同**——
+若要字节级一致的官方原版，请用 `official-5.8.9` Release（由
+`sync-official-apk.yml` 从 `FongMi/Release` 同步）。
 
-实测结果（`build-from-source.yml`，run `44574617664`）：
-
-1. 用 `release-1.11.0-fongmi` 编译 20 个定制 AAR ✅ 成功；
-2. 用官方运行时 APK 与官方 5.8.9 APK 中的 native 库替换旧的 split-ffmpeg 库，
-   通过 `verify*MpvNative` 校验 ✅ 成功；
-3. 编译 TV 源码时因上述 22 个私有类缺失失败 ❌（302 处 `cannot find symbol`）。
-
-**结论：原版 APK 可以在本仓库 Release 中原样获取，但「用公开源码自行构建出
-5.8.9 原版」客观上不可行**——作者没有公开与 5.8.9 匹配的 Media3 定制源码/产物。
-手写桩类虽然能过编译，但播放器核心功能会失效，不是「一模一样」。
-
-### 推荐做法：同步官方原版 APK
-
-使用 `Sync official FongMi TV release APK` 工作流（Actions → 运行），
-填入版本号（默认 `5.8.9`），即可把官方 release 的 4 个原版 APK
-**字节级原样**下载并发布到本仓库的 Release，附带 SHA256 校验。
-官方发布新版时，改一下版本号再运行即可完成更新。这是获得「一模一样原版 APK」
-且可持续更新的可靠方式。
-
-### 许可
-
-源码遵循上游 FongMi/TV 的 GPL-3.0 许可，详见 `LICENSE.md`。
+手动重编译：Actions → `Build FongMi TV 5.8.9 fully from source` → Run workflow。
