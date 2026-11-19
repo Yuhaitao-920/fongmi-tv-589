@@ -24,32 +24,34 @@ jobs:
 
       - name: Setup dex2jar
         run: |
-          curl -L -o dex2jar.zip \
+          rm -rf /tmp/d2j && mkdir -p /tmp/d2j
+          curl -L -o /tmp/dex2jar.zip \
             https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
-          unzip -q dex2jar.zip -d dex2jar
-          D2J=$(find dex2jar -name 'd2j-dex2jar.sh' | head -1)
+          unzip -o -q /tmp/dex2jar.zip -d /tmp/d2j
+          D2J=$(find /tmp/d2j -name 'd2j-dex2jar.sh' | head -1)
           echo "D2J=$D2J"
           chmod +x "$(dirname "$D2J")"/*.sh
           echo "D2J_PATH=$D2J" >> $GITHUB_ENV
 
       - name: Convert dex files to jars
         run: |
-          mkdir -p dexout
-          unzip -o -q official.apk 'classes*.dex' -d dexout
-          ls -lh dexout/
-          for d in dexout/*.dex; do
+          rm -rf /tmp/dexout && mkdir -p /tmp/dexout
+          unzip -o -q official.apk 'classes*.dex' -d /tmp/dexout
+          ls -lh /tmp/dexout/
+          for d in /tmp/dexout/*.dex; do
             echo "Converting $d ..."
             "$D2J_PATH" -f "$d" -o "${d%.dex}.jar" >/dev/null 2>&1 || echo "convert failed for $d"
           done
-          ls -lh dexout/*.jar 2>/dev/null || echo "NO JARS PRODUCED"
+          ls -lh /tmp/dexout/*.jar 2>/dev/null || echo "NO JARS PRODUCED"
 
       - name: Extract androidx.media3 classes into one jar
         run: |
           python3 - <<'PY'
-          import zipfile, glob, os
+          import zipfile, glob, os, shutil
+          shutil.rmtree('extract_root', ignore_errors=True)
           os.makedirs('extract_root', exist_ok=True)
           count = 0
-          for jar in glob.glob('dexout/*.jar'):
+          for jar in glob.glob('/tmp/dexout/*.jar'):
               with zipfile.ZipFile(jar) as z:
                   for name in z.namelist():
                       if name.startswith('androidx/media3/') and not name.endswith('/'):
@@ -96,9 +98,11 @@ jobs:
 
       - name: Commit extracted media3 jar and config
         run: |
+          # remove any temp artifacts accidentally committed earlier
+          rm -rf dexout extract_root dex2jar dex2jar.zip official.apk
           git config user.name "Yuhaitao-920"
           git config user.email "Yuhaitao-920@users.noreply.github.com"
-          git add -f app/libs/media3-official.jar
           git add -A
+          git add -f app/libs/media3-official.jar
           git commit -m "Extract official 5.8.9 Media3 custom classes into local jar" || echo "nothing to commit"
           git push origin HEAD:main
