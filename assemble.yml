@@ -24,10 +24,10 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Yuhaitao-920/webhtv.git /tmp/webhtv
 
-      - name: Copy official source into repo (excluding vcs)
+      - name: Copy official source into repo (excluding vcs/workflows)
         run: |
           cd /tmp/upstream
-          rm -rf .git
+          rm -rf .git .github
           cp -a . "$GITHUB_WORKSPACE"/
           cd "$GITHUB_WORKSPACE"
           echo "Copied upstream source. File count:"
