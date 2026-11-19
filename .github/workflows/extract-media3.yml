@@ -1,0 +1,82 @@
+name: Extract Media3 custom classes from official 5.8.9 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download official 5.8.9 APK
+        run: |
+          curl -L --retry 3 -o official.apk \
+            https://github.com/FongMi/Release/releases/download/5.8.9/mobile-arm64_v8a.apk
+          ls -lh official.apk
+          echo "md5: $(md5sum official.apk | cut -d' ' -f1)"
+
+      - name: Setup dex2jar
+        run: |
+          curl -L -o dex2jar.zip \
+            https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
+          unzip -q dex2jar.zip -d dex2jar
+          chmod +x dex2jar/dex-tools-2.4/*.sh
+
+      - name: Convert dex files to jars
+        run: |
+          mkdir -p dexout
+          unzip -o -q official.apk 'classes*.dex' -d dexout
+          ls -lh dexout/
+          for d in dexout/*.dex; do
+            echo "Converting $d ..."
+            dex2jar/dex-tools-2.4/d2j-dex2jar.sh -f "$d" -o "${d%.dex}.jar" >/dev/null 2>&1
+          done
+          ls -lh dexout/*.jar
+
+      - name: Extract androidx.media3 classes into one jar
+        run: |
+          mkdir -p extract_root
+          for j in dexout/*.jar; do
+            unzip -o -q "$j" 'androidx/media3/*' -d extract_root 2>/dev/null || true
+            unzip -o -q "$j" 'androidx/media3/**' -d extract_root 2>/dev/null || true
+          done
+          echo "media3 class files extracted:"
+          find extract_root/androidx/media3 -name '*.class' 2>/dev/null | wc -l
+          echo "key custom classes:"
+          find extract_root/androidx/media3 -name 'MediaChapter.class' -o -name 'DecoderMode.class' -o -name 'DolbyVisionOutputPolicy.class' -o -name 'DiscMenuController.class' -o -name 'SubtitleContent.class' 2>/dev/null | head
+          cd extract_root
+          jar cf ../app/libs/media3-official.jar androidx/media3
+          cd ..
+          ls -lh app/libs/media3-official.jar
+
+      - name: Switch build config to use extracted media3 jar
+        run: |
+          python3 - <<'PY'
+          # app/build.gradle: remove bundled media3 bundle, add the jar via fileTree (already included)
+          p='app/build.gradle'
+          s=open(p,encoding='utf-8').read()
+          s=s.replace('    implementation libs.bundles.media3\n','')
+          # remove media3 version forcing (may point to bundled version)
+          s=s.replace("            eachDependency { details ->\n                if (details.requested.group == 'androidx.media3') {\n                    details.useVersion(libs.versions.media3.get())\n                }\n            }\n",'\n')
+          # fileTree must include jar too
+          s=s.replace('include: ["*.aar"]', 'include: ["*.aar", "*.jar"]')
+          open(p,'w',encoding='utf-8').write(s)
+          print('media3 bundle removed:', 'libs.bundles.media3' not in s)
+          print('fileTree line:', [l.strip() for l in s.splitlines() if 'fileTree' in l])
+          PY
+
+      - name: Commit extracted media3 jar and config
+        run: |
+          git config user.name "Yuhaitao-920"
+          git config user.email "Yuhaitao-920@users.noreply.github.com"
+          git add -f app/libs/media3-official.jar
+          git add -A
+          git commit -m "Extract official 5.8.9 Media3 custom classes into local jar" || echo "nothing to commit"
+          git push origin HEAD:main
