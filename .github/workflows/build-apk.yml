@@ -6,13 +6,13 @@ on:
       variant:
         description: 'Build variant'
         required: true
-        default: 'mobileArm64_v8a'
+        default: 'MobileArm64_v8a'
         type: choice
         options:
-          - mobileArm64_v8a
-          - mobileArmeabi_v7a
-          - leanbackArm64_v8a
-          - leanbackArmeabi_v7a
+          - MobileArm64_v8a
+          - MobileArmeabi_v7a
+          - LeanbackArm64_v8a
+          - LeanbackArmeabi_v7a
           - all
       create_release:
         description: 'Create a GitHub Release with the APK'
