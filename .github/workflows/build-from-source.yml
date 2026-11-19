@@ -1,0 +1,165 @@
+name: Build FongMi TV 5.8.9 fully from source (custom Media3 AARs)
+
+# True from-source build of the official FongMi TV 5.8.9:
+#   Stage 1 - compile FongMi's custom Media3 (release-1.11.0-fongmi) into 20 lib-*-release.aar
+#   Stage 2 - compile official FongMi/TV fongmi branch (versionCode 589) against those AARs
+# This avoids Maven entirely: upstream app/build.gradle loads AARs from app/libs via fileTree.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      create_release:
+        description: 'Publish built APK to a GitHub Release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK packages
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANGER" ] && [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME" -name sdkmanager -type f | head -1)
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+          echo "sdk.dir=$ANDROID_HOME" > "$HOME/local.properties"
+
+      # ---------- Stage 1: custom Media3 AARs ----------
+      - name: Clone FongMi custom Media3 (release-1.11.0-fongmi)
+        run: |
+          git clone --depth 1 --branch release-1.11.0-fongmi https://github.com/FongMi/media.git /tmp/media
+          echo "Media3 commit: $(git -C /tmp/media rev-parse HEAD)"
+
+      - name: Build custom Media3 AARs
+        run: |
+          cd /tmp/media
+          cp "$HOME/local.properties" ./local.properties
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          echo "===== built AARs ====="
+          find . -name 'lib-*-release.aar' -type f | sort
+          AAR_COUNT=$(find . -name 'lib-*-release.aar' -type f | wc -l)
+          echo "AAR count: $AAR_COUNT"
+          test "$AAR_COUNT" -ge 15 || { echo "ERROR: too few AARs"; exit 1; }
+          mkdir -p /tmp/custom-aars
+          find . -name 'lib-*-release.aar' -type f -exec cp {} /tmp/custom-aars/ \;
+          ls -lh /tmp/custom-aars/
+
+      # ---------- Stage 2: official 5.8.9 source ----------
+      - name: Clone official FongMi TV 5.8.9 source (fongmi branch)
+        run: |
+          git clone --depth 1 --branch fongmi https://github.com/FongMi/TV.git /tmp/tv
+          echo "TV commit: $(git -C /tmp/tv rev-parse HEAD)"
+          grep -E 'versionName|versionCode' /tmp/tv/app/build.gradle | head -4
+
+      - name: Assemble source into workspace
+        run: |
+          cd /tmp/tv
+          rm -rf .git .github
+          cp -a . "$GITHUB_WORKSPACE"/
+          cd "$GITHUB_WORKSPACE"
+          echo "Source files: $(find . -type f | wc -l)"
+
+      - name: Place custom Media3 AARs into app/libs
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p app/libs
+          cp -v /tmp/custom-aars/*.aar app/libs/
+          echo "app/libs AARs: $(find app/libs -name '*.aar' | wc -l)"
+
+      - name: Recreate gradle-wrapper.properties
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.7.1-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          chmod +x gradlew
+
+      - name: Generate signing keystore and local.properties
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          keytool -genkeypair -v -keystore app/release.jks \
+            -alias fongmi -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=FongMiRebuild, OU=Build, O=Rebuild, L=NA, ST=NA, C=CN" > /dev/null 2>&1
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          storeFile=release.jks
+          keyAlias=fongmi
+          storePassword=android123
+          keyPassword=android123
+          EOF
+          echo "local.properties written"
+
+      - name: Build APK from source
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          BT="${{ inputs.build_type }}"
+          TASK="assemble${BT}"
+          echo "Running ./gradlew $TASK"
+          ./gradlew "$TASK" --no-daemon --stacktrace
+
+      - name: Collect APKs
+        id: collect
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p dist
+          find app/build/outputs -name '*.apk' -type f | while read f; do cp "$f" dist/; done
+          echo "===== APKs ====="
+          ls -lh dist/
+          echo "===== sha256 ====="
+          sha256sum dist/*.apk | tee dist/SHA256SUMS.txt
+          test -n "$(ls dist/*.apk 2>/dev/null)" || { echo "ERROR: no APK produced"; exit 1; }
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fongmi-5.8.9-from-source
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Create Release
+        if: ${{ inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          TAG="from-source-5.8.9-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" dist/*.apk dist/SHA256SUMS.txt \
+            --title "FongMi TV 5.8.9 (built from source)" \
+            --notes "Compiled from official FongMi/TV fongmi branch (versionCode 589) against custom Media3 AARs built from FongMi/media release-1.11.0-fongmi. Not byte-identical to official APK (different toolchain/signing)." \
+            --repo "$GITHUB_REPOSITORY"
