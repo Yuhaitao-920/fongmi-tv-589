@@ -62,7 +62,14 @@ jobs:
           cd /tmp/media
           cp "$HOME/local.properties" ./local.properties
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          # The Gradle plugin portal occasionally returns a bad POM; retry a few times.
+          OK=0
+          for attempt in 1 2 3; do
+            echo "=== assembleRelease attempt $attempt ==="
+            if ./gradlew assembleRelease --no-daemon --stacktrace; then OK=1; break; fi
+            sleep 30
+          done
+          test "$OK" = "1" || { echo "ERROR: assembleRelease failed after 3 attempts"; exit 1; }
           echo "===== built AARs ====="
           find . -name 'lib-*-release.aar' -type f | sort
           AAR_COUNT=$(find . -name 'lib-*-release.aar' -type f | wc -l)
