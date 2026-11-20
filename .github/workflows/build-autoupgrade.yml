@@ -1,0 +1,243 @@
+name: Build FongMi TV from source (auto-follow upstream)
+
+# One-click build that follows the official FongMi/TV source:
+#   - Stage 1: compile a FongMi-compatible custom Media3 into the 20 lib-*-release.aar
+#   - Stage 2: compile the official FongMi/TV source against those AARs
+#
+# To follow an official upgrade:
+#   1)点击 Run workflow。默认 tv_ref=fongmi（官方分支 HEAD，升级后即为新版本）。
+#   2)版本号从 app/build.gradle 自动读取，Release tag/title 自动带版本号。
+#   3)如果官方换了 Media3 播放 API，前置检查会给出提示，需用 media_ref 指向匹配的新 fork。
+#   4)签名校验补丁带容错：上游改了那行代码也不会让构建失败，只会警告模块可能不兼容。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tv_ref:
+        description: 'FongMi/TV 源码 ref（分支/tag/commit，默认 fongmi=官方最新）'
+        required: true
+        default: 'fongmi'
+        type: string
+      media_ref:
+        description: '定制 Media3 分支（官方换播放 API 时才需改）'
+        required: true
+        default: 'release-1.11.0-fongmi'
+        type: string
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      create_release:
+        description: 'Publish built APK to a GitHub Release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK packages
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME" -name sdkmanager -type f | head -1)
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+          echo "sdk.dir=$ANDROID_HOME" > "$HOME/local.properties"
+
+      # ---------- Stage 2a (early): clone upstream TV source, detect version ----------
+      - name: Clone official FongMi TV source
+        run: |
+          REF="${{ inputs.tv_ref }}"
+          git clone --depth 1 --branch "$REF" https://github.com/FongMi/TV.git /tmp/tv 2>/dev/null \
+            || { git clone --filter=blob:none https://github.com/FongMi/TV.git /tmp/tv && git -C /tmp/tv checkout "$REF"; }
+          echo "TV ref: $REF"
+          echo "TV commit: $(git -C /tmp/tv rev-parse HEAD)"
+          git -C /tmp/tv log -1 --format='%ci %s'
+
+      - name: Detect version and check Media3 compatibility
+        run: |
+          python3 - <<'PY'
+          import re, os
+          s = open('/tmp/tv/app/build.gradle', encoding='utf-8').read()
+          v = re.search(r'versionName\s+["\']([^"\']+)["\']', s)
+          c = re.search(r'versionCode\s+(\d+)', s)
+          ver = v.group(1) if v else 'unknown'
+          code = c.group(1) if c else '0'
+          print('Detected upstream version: %s (versionCode %s)' % (ver, code))
+          # Show the media3 dependency lines so a version bump is visible at a glance
+          for line in s.splitlines():
+              if 'media3' in line.lower() or 'fongmi' in line.lower() and 'implementation' in line:
+                  print('  dep:', line.strip()[:160])
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('TV_VERSION=%s\nTV_CODE=%s\n' % (ver, code))
+          PY
+          echo "Media3 fork ref: ${{ inputs.media_ref }}"
+          echo ">>> If upstream bumped Media3/playback APIs, set media_ref to a matching fork. <<<"
+
+      # ---------- Stage 1: custom Media3 AARs ----------
+      - name: Clone custom Media3 with TV playback APIs
+        run: |
+          git clone --depth 1 --branch "${{ inputs.media_ref }}" https://github.com/Diaojiangjun/media.git /tmp/media
+          echo "Media3 commit: $(git -C /tmp/media rev-parse HEAD)"
+          for c in \
+            libraries/common/src/main/java/androidx/media3/common/DecoderMode.java \
+            libraries/common/src/main/java/androidx/media3/common/DiscMenuController.java \
+            libraries/common/src/main/java/androidx/media3/common/text/SubtitleContent.java \
+            libraries/mpvplayer/src/main/java/androidx/media3/mpvplayer/MpvPlayer.java; do
+            test -f "/tmp/media/$c" || { echo "ERROR: missing $c (Media3 fork does not match this TV version)"; exit 1; }
+            echo "OK $c"
+          done
+
+      - name: Patch PlayerView.getVideoBounds
+        run: |
+          python3 - <<'PY'
+          import base64
+          p = '/tmp/media/libraries/ui/src/main/java/androidx/media3/ui/PlayerView.java'
+          s = open(p, encoding='utf-8').read()
+          if 'getVideoBounds' in s:
+              print('already present')
+          else:
+              method = base64.b64decode('ICAvKiogUmV0dXJucyB0aGUgYm91bmRzIG9mIHRoZSB2aWRlbyBjb250ZW50IGluIHRoaXMgdmlldydzIGNvb3JkaW5hdGUgc3BhY2UuICovCiAgQFVuc3RhYmxlQXBpCiAgcHVibGljIFJlY3RGIGdldFZpZGVvQm91bmRzKCkgewogICAgUmVjdEYgYm91bmRzID0gbmV3IFJlY3RGKCk7CiAgICBATnVsbGFibGUgVmlldyB0YXJnZXQgPSBzdXJmYWNlVmlldyAhPSBudWxsID8gc3VyZmFjZVZpZXcgOiBjb250ZW50RnJhbWU7CiAgICBpZiAodGFyZ2V0ID09IG51bGwpIHsKICAgICAgYm91bmRzLnNldCgwLCAwLCBnZXRXaWR0aCgpLCBnZXRIZWlnaHQoKSk7CiAgICAgIHJldHVybiBib3VuZHM7CiAgICB9CiAgICBSZWN0IHJlY3QgPSBuZXcgUmVjdCgpOwogICAgcmVjdC5zZXQoMCwgMCwgdGFyZ2V0LmdldFdpZHRoKCksIHRhcmdldC5nZXRIZWlnaHQoKSk7CiAgICBvZmZzZXREZXNjZW5kYW50UmVjdFRvTXlDb29yZHModGFyZ2V0LCByZWN0KTsKICAgIGJvdW5kcy5zZXQocmVjdCk7CiAgICByZXR1cm4gYm91bmRzOwogIH0KCg==').decode('utf-8')
+              if 'import android.graphics.RectF;' not in s:
+                  s = s.replace('import android.graphics.Rect;',
+                                'import android.graphics.Rect;\nimport android.graphics.RectF;', 1)
+              anchors = ['  /** Returns the current video scale and pan transform. */',
+                         '  /** Returns the current video scale and pan transform */']
+              a = next((x for x in anchors if x in s), None)
+              if a:
+                  s = s.replace(a, method + a, 1)
+                  open(p, 'w', encoding='utf-8').write(s)
+                  print('Injected getVideoBounds')
+              else:
+                  print('WARN: getVideoBounds anchor not found; build may fail if TV needs it')
+          PY
+
+      - name: Build custom Media3 AARs
+        run: |
+          cd /tmp/media
+          cp "$HOME/local.properties" ./local.properties
+          chmod +x gradlew
+          OK=0
+          for attempt in 1 2 3; do
+            echo "=== assembleRelease attempt $attempt ==="
+            EXTRA=""
+            [ "$attempt" -gt 1 ] && EXTRA="--refresh-dependencies"
+            if ./gradlew assembleRelease --no-daemon --stacktrace $EXTRA; then OK=1; break; fi
+            sleep 30
+          done
+          test "$OK" = "1" || { echo "ERROR: assembleRelease failed after 3 attempts"; exit 1; }
+          AAR_COUNT=$(find . -name 'lib-*-release.aar' -type f | wc -l)
+          echo "AAR count: $AAR_COUNT"
+          test "$AAR_COUNT" -ge 15 || { echo "ERROR: too few AARs"; exit 1; }
+          mkdir -p /tmp/custom-aars
+          grep -vE '^\s*(#|$)' move.txt | while read -r aar_name; do
+            f=$(find . -name "$aar_name" -type f | head -1)
+            test -n "$f" || { echo "ERROR: move.txt AAR not built: $aar_name"; exit 1; }
+            cp "$f" /tmp/custom-aars/
+          done
+          echo "AARs copied: $(ls /tmp/custom-aars/*.aar | wc -l)"
+
+      - name: Assemble source into workspace
+        run: |
+          cd /tmp/tv
+          rm -rf .git .github
+          cp -a . "$GITHUB_WORKSPACE"/
+          cd "$GITHUB_WORKSPACE"
+          echo "Source files: $(find . -type f | wc -l)"
+
+      - name: Allow official-signed runtime modules (robust patch)
+        run: |
+          python3 -c "import base64;exec(base64.b64decode('aW1wb3J0IGJhc2U2NCwgcmUKcCA9ICJjYXR2b2Qvc3JjL21haW4vamF2YS9jb20vZ2l0aHViL2NhdHZvZC91dGlscy9SdW50aW1lTW9kdWxlLmphdmEiCnMgPSBvcGVuKHAsIGVuY29kaW5nPSJ1dGYtOCIpLnJlYWQoKQppZiAidmVyaWZ5U2lnbmVyIiBpbiBzOgogICAgcHJpbnQoImFscmVhZHkgcGF0Y2hlZCIpCmVsc2U6CiAgICBoZWxwZXIgPSBiYXNlNjQuYjY0ZGVjb2RlKCJJQ0FnSUhCeWFYWmhkR1VnYzNSaGRHbGpJR0p2YjJ4bFlXNGdkbVZ5YVdaNVUybG5ibVZ5S0ZOcFoyNWhkSFZ5WlZ0ZElHVjRjR1ZqZEdWa0xDQlRhV2R1WVhSMWNtVmJYU0JoWTNSMVlXd3BJSHNLSUNBZ0lDQWdJQ0JwWmlBb1lXTjBkV0ZzSUQwOUlHNTFiR3dnZkh3Z1lXTjBkV0ZzTG14bGJtZDBhQ0E5UFNBd0tTQnlaWFIxY200Z1ptRnNjMlU3Q2lBZ0lDQWdJQ0FnYW1GMllTNTFkR2xzTGxObGREeFRkSEpwYm1jK0lHRnNiRzkzWldRZ1BTQnVaWGNnYW1GMllTNTFkR2xzTGtoaGMyaFRaWFE4UGlncE93b2dJQ0FnSUNBZ0lHRnNiRzkzWldRdVlXUmtLQ0kzTWpJelJFVXhRVUZGT1VVd09URXhNRUV6TURBM1F6azRNRUZHTURneFFqRTJNRGxCTTBaRlF6VkNRa0pFUmtFM1JEbERSVVJDTXpVeU5URXhNRUV4SWlrN0NpQWdJQ0FnSUNBZ2FXWWdLR1Y0Y0dWamRHVmtJQ0U5SUc1MWJHd3BJR1p2Y2lBb1UybG5ibUYwZFhKbElITWdPaUJsZUhCbFkzUmxaQ2tnWVd4c2IzZGxaQzVoWkdRb2MyaGhNalUyU0dWNEtITXVkRzlDZVhSbFFYSnlZWGtvS1NrcE93b2dJQ0FnSUNBZ0lHWnZjaUFvVTJsbmJtRjBkWEpsSUhNZ09pQmhZM1IxWVd3cElHbG1JQ2doWVd4c2IzZGxaQzVqYjI1MFlXbHVjeWh6YUdFeU5UWklaWGdvY3k1MGIwSjVkR1ZCY25KaGVTZ3BLU2twSUhKbGRIVnliaUJtWVd4elpUc0tJQ0FnSUNBZ0lDQnlaWFIxY200Z2RISjFaVHNLSUNBZ0lIMEtDaUFnSUNCd2NtbDJZWFJsSUhOMFlYUnBZeUJUZEhKcGJtY2djMmhoTWpVMlNHVjRLR0o1ZEdWYlhTQmtZWFJoS1NCN0NpQWdJQ0FnSUNBZ2RISjVJSHNLSUNBZ0lDQWdJQ0FnSUNBZ1lubDBaVnRkSUdRZ1BTQk5aWE56WVdkbFJHbG5aWE4wTG1kbGRFbHVjM1JoYm1ObEtDSlRTRUV0TWpVMklpa3VaR2xuWlhOMEtHUmhkR0VwT3dvZ0lDQWdJQ0FnSUNBZ0lDQlRkSEpwYm1kQ2RXbHNaR1Z5SUdJZ1BTQnVaWGNnVTNSeWFXNW5RblZwYkdSbGNpZ3BPd29nSUNBZ0lDQWdJQ0FnSUNCbWIzSWdLR0o1ZEdVZ2RpQTZJR1FwSUdJdVlYQndaVzVrS0ZOMGNtbHVaeTVtYjNKdFlYUW9JaVV3TWxnaUxDQjJJQ1lnTUhobVppa3BPd29nSUNBZ0lDQWdJQ0FnSUNCeVpYUjFjbTRnWWk1MGIxTjBjbWx1WnlncE93b2dJQ0FnSUNBZ0lIMGdZMkYwWTJnZ0tFVjRZMlZ3ZEdsdmJpQmxLU0I3SUhKbGRIVnliaUFpSWpzZ2ZRb2dJQ0FnZlFvSyIpLmRlY29kZSgidXRmLTgiKQogICAgYW5jaG9yID0gIiAgICBwcml2YXRlIHZvaWQgdmVyaWZ5UGFja2FnZShQYWNrYWdlSW5mbyBpbmZvKSB0aHJvd3MgSU9FeGNlcHRpb24geyIKICAgIHRhcmdldCA9IE5vbmUKICAgIGZvciBpZHgsIGxpbmUgaW4gZW51bWVyYXRlKHMuc3BsaXRsaW5lcyhrZWVwZW5kcz1UcnVlKSk6CiAgICAgICAgaWYgJ0ludmFsaWQgcnVudGltZSBzaWduZXInIGluIGxpbmUgYW5kICdpZiAoJyBpbiBsaW5lIGFuZCAndGhyb3cgbmV3IElPRXhjZXB0aW9uJyBpbiBsaW5lOgogICAgICAgICAgICB0YXJnZXQgPSBpZHgKICAgICAgICAgICAgYnJlYWsKICAgIGlmIGFuY2hvciBpbiBzIGFuZCB0YXJnZXQgaXMgbm90IE5vbmU6CiAgICAgICAgbGluZXMgPSBzLnNwbGl0bGluZXMoa2VlcGVuZHM9VHJ1ZSkKICAgICAgICBsaW5lID0gbGluZXNbdGFyZ2V0XQogICAgICAgIGVvbCA9IGxpbmVbbGVuKGxpbmUucnN0cmlwKCkpIDpdCiAgICAgICAgaW5kZW50ID0gbGluZVs6bGVuKGxpbmUpIC0gbGVuKGxpbmUubHN0cmlwKCkpXQogICAgICAgIGxpbmVzW3RhcmdldF0gPSBpbmRlbnQgKyAnaWYgKCF2ZXJpZnlTaWduZXIoZXhwZWN0ZWQsIGFjdHVhbCkpIHRocm93IG5ldyBJT0V4Y2VwdGlvbigiSW52YWxpZCBydW50aW1lIHNpZ25lciIpOycgKyBlb2wKICAgICAgICBzID0gJycuam9pbihsaW5lcykKICAgICAgICBzID0gcy5yZXBsYWNlKGFuY2hvciwgaGVscGVyICsgYW5jaG9yLCAxKQogICAgICAgIG9wZW4ocCwgInciLCBlbmNvZGluZz0idXRmLTgiKS53cml0ZShzKQogICAgICAgIHByaW50KCJPSzogc2lnbmVyIGNoZWNrIHBhdGNoZWQgKG9mZmljaWFsICsgc2VsZi1idWlsdCBjZXJ0cyBhY2NlcHRlZCkiKQogICAgZWxzZToKICAgICAgICBwcmludCgiV0FSTjogc2lnbmVyIGNoZWNrIHBhdHRlcm4gbm90IGZvdW5kIGluIHRoaXMgdXBzdHJlYW0gdmVyc2lvbjsiKQogICAgICAgIHByaW50KCJXQVJOOiBidWlsZCB3aWxsIGNvbnRpbnVlLCBidXQgb2ZmaWNpYWwgcnVudGltZSBtb2R1bGVzIG1heSBmYWlsIHdpdGggSW52YWxpZCBydW50aW1lIHNpZ25lci4iKQogICAgICAgIHByaW50KCJXQVJOOiBhbmNob3JfcHJlc2VudD0lcyBzaWduZXJfbGluZV9tYXRjaGVkPSVzIiAlIChhbmNob3IgaW4gcywgdGFyZ2V0IGlzIG5vdCBOb25lKSkK').decode('utf-8'))"
+
+      - name: Place custom Media3 AARs into app/libs
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p app/libs
+          cp -v /tmp/custom-aars/*.aar app/libs/
+          echo "app/libs AARs: $(find app/libs -name '*.aar' | wc -l)"
+
+      - name: Recreate gradle-wrapper.properties
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.7.1-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          chmod +x gradlew
+
+      - name: Generate signing keystore and local.properties
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          echo "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" | base64 -d > app/release.jks
+          keytool -list -keystore app/release.jks -storepass android123 2>&1 | head -5
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          storeFile=release.jks
+          keyAlias=fongmi
+          storePassword=android123
+          keyPassword=android123
+          EOF
+          echo "local.properties written"
+
+      - name: Build APK from source
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          TASK="assemble${{ inputs.build_type }}"
+          echo "Running ./gradlew $TASK (version $TV_VERSION / $TV_CODE)"
+          ./gradlew "$TASK" --no-daemon --stacktrace || ./gradlew "$TASK" --no-daemon --stacktrace --refresh-dependencies
+
+      - name: Collect APKs
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p dist
+          find app/build/outputs -name '*.apk' -type f | while read f; do cp "$f" dist/; done
+          ls -lh dist/
+          sha256sum dist/*.apk | tee dist/SHA256SUMS.txt
+          test -n "$(ls dist/*.apk 2>/dev/null)" || { echo "ERROR: no APK produced"; exit 1; }
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fongmi-${{ env.TV_VERSION }}-from-source
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Create Release
+        if: ${{ inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          TAG="from-source-${TV_VERSION}-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" dist/*.apk dist/SHA256SUMS.txt \
+            --title "FongMi TV ${TV_VERSION} (built from source)" \
+            --notes "Auto-follow build from official FongMi/TV @ ${{ inputs.tv_ref }} (version \${TV_VERSION}, versionCode \${TV_CODE}) against custom Media3 AARs @ ${{ inputs.media_ref }}. Self-built with a FIXED keystore (repeatable builds). Runtime signer check patched to accept official-signed modules. Not byte-identical to the official APK." \
+            --repo "$GITHUB_REPOSITORY"
